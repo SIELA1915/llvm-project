@@ -11,6 +11,7 @@
 
 #include "chunk.h"
 #include "common.h"
+#include "internal_defs.h"
 #include "list.h"
 #include "mem_map.h"
 #include "memtag.h"
@@ -480,6 +481,13 @@ public:
     DCHECK_EQ(FreedBytes, 0U);
     Cache.init(ReleaseToOsInterval);
     Stats.init();
+
+    ReservedMemory.create(0U, 0x10000, "scudo:secondary_integrity");
+    DCHECK_NE(ReservedMemory.getBase(), 0U);
+
+    InUseHeaders = ReservedMemory.dispatch(ReservedMemory.getBase(), 0x1000);
+    CHECK(InUseHeaders.isAllocated());
+    
     if (LIKELY(S))
       S->link(&Stats);
   }
@@ -548,6 +556,10 @@ private:
   u32 NumberOfAllocs GUARDED_BY(Mutex) = 0;
   u32 NumberOfFrees GUARDED_BY(Mutex) = 0;
   LocalStats Stats GUARDED_BY(Mutex);
+
+  MemMapT InUseHeaders = {};
+  ReservedMemoryT ReservedMemory = {};
+
 };
 
 // As with the Primary, the size passed to this function includes any desired
@@ -592,6 +604,9 @@ void *MapAllocator<Config>::allocate(const Options &Options, uptr Size,
                BlockEnd - PtrInt);
       {
         ScopedLock L(Mutex);
+
+        ((LargeBlock::Header*)InUseHeaders.getBase())[0] = *H;
+      
         InUseBlocks.push_back(H);
         AllocatedBytes += H->CommitSize;
         FragmentedBytes += H->MemMap.getCapacity() - H->CommitSize;
@@ -685,6 +700,12 @@ void MapAllocator<Config>::deallocate(const Options &Options, void *Ptr)
   const uptr CommitSize = H->CommitSize;
   {
     ScopedLock L(Mutex);
+
+
+    auto *IntegrityList = ((LargeBlock::Header*)InUseHeaders.getBase());
+
+    // loop over largeblock headers
+    
     InUseBlocks.remove(H);
     FreedBytes += CommitSize;
     FragmentedBytes -= H->MemMap.getCapacity() - CommitSize;
