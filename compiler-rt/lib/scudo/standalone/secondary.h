@@ -482,11 +482,13 @@ public:
     Cache.init(ReleaseToOsInterval);
     Stats.init();
 
-    ReservedMemory.create(0U, 0x10000, "scudo:secondary_integrity");
-    DCHECK_NE(ReservedMemory.getBase(), 0U);
+    InUseReserved.create(0U, 0x10000, "scudo:secondary_integrity");
+    DCHECK_NE(InUseReserved.getBase(), 0U);
 
-    InUseHeaders = ReservedMemory.dispatch(ReservedMemory.getBase(), 0x1000);
-    CHECK(InUseHeaders.isAllocated());
+    InUseAddresses = InUseReserved.dispatch(InUseReserved.getBase(), sizeof(void *)*1000);
+    CHECK(InUseAddresses.isAllocated());
+    InUseAddresses.setMemoryPermission(InUseAddresses.getBase(), sizeof(void *)*1000, 0);
+    InUseCount = 1000;
     
     if (LIKELY(S))
       S->link(&Stats);
@@ -557,8 +559,9 @@ private:
   u32 NumberOfFrees GUARDED_BY(Mutex) = 0;
   LocalStats Stats GUARDED_BY(Mutex);
 
-  MemMapT InUseHeaders = {};
-  ReservedMemoryT ReservedMemory = {};
+  MemMapT InUseAddresses GUARDED_BY(Mutex) = {};
+  u32 InUseCount GUARDED_BY(Mutex) = 0;
+  ReservedMemoryT InUseReserved GUARDED_BY(Mutex) = {};
 
 };
 
@@ -605,7 +608,21 @@ void *MapAllocator<Config>::allocate(const Options &Options, uptr Size,
       {
         ScopedLock L(Mutex);
 
-        ((LargeBlock::Header*)InUseHeaders.getBase())[0] = *H;
+        void **IntegrityList = ((void **)InUseAddresses.getBase());
+        bool isFull = true;
+        
+        for (u32 I = 0; I < InUseCount; I++) {
+            if (IntegrityList[I] == nullptr) {
+                isFull = false;
+                IntegrityList[I] = Ptr;
+                break;
+            }
+        }
+        
+        if (isFull) {
+            unmap(H);
+            return nullptr;
+        }
       
         InUseBlocks.push_back(H);
         AllocatedBytes += H->CommitSize;
@@ -681,6 +698,25 @@ void *MapAllocator<Config>::allocate(const Options &Options, uptr Size,
     *BlockEndPtr = CommitBase + CommitSize;
   {
     ScopedLock L(Mutex);
+
+    void **IntegrityList = reinterpret_cast<void **>(InUseAddresses.getBase());
+    bool isFull = true;
+
+    void *test = *IntegrityList;
+    
+    for (u32 I = 0; I < InUseCount; I++) {
+        if (IntegrityList[I] == nullptr) {
+            isFull = false;
+            IntegrityList[I] = reinterpret_cast<void *>(HeaderPos + LargeBlock::getHeaderSize());
+            break;
+        }
+    }
+
+    if (isFull) {
+        MemMap.unmap(MemMap.getBase(), MemMap.getCapacity());
+        return nullptr;
+    }
+
     InUseBlocks.push_back(H);
     AllocatedBytes += CommitSize;
     FragmentedBytes += H->MemMap.getCapacity() - CommitSize;
@@ -702,9 +738,20 @@ void MapAllocator<Config>::deallocate(const Options &Options, void *Ptr)
     ScopedLock L(Mutex);
 
 
-    auto *IntegrityList = ((LargeBlock::Header*)InUseHeaders.getBase());
+    void **IntegrityList = ((void **)InUseAddresses.getBase());
+    bool isValid = false;
+    
+    for (u32 I = 0; I < InUseCount; I++) {
+        if (IntegrityList[I] == Ptr) {
+            isValid = true;
+            IntegrityList[I] = nullptr;
+            break;
+        }
+    }
 
-    // loop over largeblock headers
+    if (!isValid) {
+        return;
+    }
     
     InUseBlocks.remove(H);
     FreedBytes += CommitSize;
