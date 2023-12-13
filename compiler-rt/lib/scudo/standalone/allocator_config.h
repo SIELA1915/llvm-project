@@ -153,6 +153,7 @@ struct DefaultConfig {
       static const s32 MinReleaseToOsIntervalMs = INT32_MIN;
       static const s32 MaxReleaseToOsIntervalMs = INT32_MAX;
     };
+      static const bool VerifyInUseAddresses = true;
       static const u32 InUseBlocksSize = 1000U;
     template <typename Config> using CacheT = MapAllocatorCache<Config>;
   };

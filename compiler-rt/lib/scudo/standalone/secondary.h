@@ -482,13 +482,15 @@ public:
     Cache.init(ReleaseToOsInterval);
     Stats.init();
 
-    ReservedMemoryT InUseReserved;
-    InUseReserved.create(0U, sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), "scudo:secondary_integrity");
-    DCHECK_NE(InUseReserved.getBase(), 0U);
-
-    InUseAddresses = InUseReserved.dispatch(InUseReserved.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1));
-    CHECK(InUseAddresses.isAllocated());
-    InUseAddresses.setMemoryPermission(InUseAddresses.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), 0);
+    if (Config::Secondary::VerifyInUseAddresses) {
+        ReservedMemoryT InUseReserved;
+        InUseReserved.create(0U, sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), "scudo:secondary_integrity");
+        DCHECK_NE(InUseReserved.getBase(), 0U);
+        
+        InUseAddresses = InUseReserved.dispatch(InUseReserved.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1));
+        CHECK(InUseAddresses.isAllocated());
+        InUseAddresses.setMemoryPermission(InUseAddresses.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), 0);
+    }
     
     if (LIKELY(S))
       S->link(&Stats);
@@ -606,38 +608,40 @@ void *MapAllocator<Config>::allocate(const Options &Options, uptr Size,
       {
         ScopedLock L(Mutex);
 
-        void **IntegrityList = reinterpret_cast<void **>(InUseAddresses.getBase());
-        bool isFull = true;
-        bool reachedEnd = false;
-
-        while (!reachedEnd) {
-            for (u32 I = 0; I < Config::Secondary::InUseBlocksSize; I++) {
-                if (IntegrityList[I] == nullptr) {
-                    isFull = false;
-                    IntegrityList[I] = Ptr;
-                    break;
+        if (Config::Secondary::VerifyInUseAddresses) {
+            void **IntegrityList = reinterpret_cast<void **>(InUseAddresses.getBase());
+            bool isFull = true;
+            bool reachedEnd = false;
+            
+            while (!reachedEnd) {
+                for (u32 I = 0; I < Config::Secondary::InUseBlocksSize; I++) {
+                    if (IntegrityList[I] == nullptr) {
+                        isFull = false;
+                        IntegrityList[I] = Ptr;
+                        break;
+                    }
+                }
+                if (isFull && IntegrityList[Config::Secondary::InUseBlocksSize] != nullptr) {
+                    IntegrityList = static_cast<void **>(IntegrityList[Config::Secondary::InUseBlocksSize]);
+                } else {
+                    reachedEnd = true;
                 }
             }
-            if (isFull && IntegrityList[Config::Secondary::InUseBlocksSize] != nullptr) {
+            
+            if (isFull) {
+                ReservedMemoryT InUseReserved;
+                InUseReserved.create(0U, sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), "scudo:secondary_integrity");
+                DCHECK_NE(InUseReserved.getBase(), 0U);
+                
+                MemMapT NewAddresses = InUseReserved.dispatch(InUseReserved.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1));
+                CHECK(NewAddresses.isAllocated());
+                NewAddresses.setMemoryPermission(NewAddresses.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), 0);
+                
+                IntegrityList[Config::Secondary::InUseBlocksSize] = reinterpret_cast<void *>(NewAddresses.getBase());
+                
                 IntegrityList = static_cast<void **>(IntegrityList[Config::Secondary::InUseBlocksSize]);
-            } else {
-                reachedEnd = true;
+                IntegrityList[0] = Ptr;
             }
-        }
-        
-        if (isFull) {
-            ReservedMemoryT InUseReserved;
-            InUseReserved.create(0U, sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), "scudo:secondary_integrity");
-            DCHECK_NE(InUseReserved.getBase(), 0U);
-            
-            MemMapT NewAddresses = InUseReserved.dispatch(InUseReserved.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1));
-            CHECK(NewAddresses.isAllocated());
-            NewAddresses.setMemoryPermission(NewAddresses.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), 0);
-            
-            IntegrityList[Config::Secondary::InUseBlocksSize] = reinterpret_cast<void *>(NewAddresses.getBase());
-
-            IntegrityList = static_cast<void **>(IntegrityList[Config::Secondary::InUseBlocksSize]);
-            IntegrityList[0] = Ptr;
         }
       
         InUseBlocks.push_back(H);
@@ -715,38 +719,40 @@ void *MapAllocator<Config>::allocate(const Options &Options, uptr Size,
   {
     ScopedLock L(Mutex);
 
-    void **IntegrityList = reinterpret_cast<void **>(InUseAddresses.getBase());
-    bool isFull = true;
-    bool reachedEnd = false;
-    
-    while (!reachedEnd) {
-        for (u32 I = 0; I < Config::Secondary::InUseBlocksSize; I++) {
-            if (IntegrityList[I] == nullptr) {
-                isFull = false;
-                IntegrityList[I] = reinterpret_cast<void *>(HeaderPos + LargeBlock::getHeaderSize());
-                break;
+    if (Config::Secondary::VerifyInUseAddresses) {
+        void **IntegrityList = reinterpret_cast<void **>(InUseAddresses.getBase());
+        bool isFull = true;
+        bool reachedEnd = false;
+        
+        while (!reachedEnd) {
+            for (u32 I = 0; I < Config::Secondary::InUseBlocksSize; I++) {
+                if (IntegrityList[I] == nullptr) {
+                    isFull = false;
+                    IntegrityList[I] = reinterpret_cast<void *>(HeaderPos + LargeBlock::getHeaderSize());
+                    break;
+                }
+            }
+            if (isFull && IntegrityList[Config::Secondary::InUseBlocksSize] != nullptr) {
+                IntegrityList = static_cast<void **>(IntegrityList[Config::Secondary::InUseBlocksSize]);
+            } else {
+                reachedEnd = true;
             }
         }
-        if (isFull && IntegrityList[Config::Secondary::InUseBlocksSize] != nullptr) {
+        
+        if (isFull) {
+            ReservedMemoryT InUseReserved;
+            InUseReserved.create(0U, sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), "scudo:secondary_integrity");
+            DCHECK_NE(InUseReserved.getBase(), 0U);
+            
+            MemMapT NewAddresses = InUseReserved.dispatch(InUseReserved.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1));
+            CHECK(NewAddresses.isAllocated());
+            NewAddresses.setMemoryPermission(NewAddresses.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), 0);
+            
+            IntegrityList[Config::Secondary::InUseBlocksSize] = reinterpret_cast<void *>(NewAddresses.getBase());
+            
             IntegrityList = static_cast<void **>(IntegrityList[Config::Secondary::InUseBlocksSize]);
-        } else {
-            reachedEnd = true;
+            IntegrityList[0] = reinterpret_cast<void *>(HeaderPos + LargeBlock::getHeaderSize());
         }
-    }
-    
-    if (isFull) {
-        ReservedMemoryT InUseReserved;
-        InUseReserved.create(0U, sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), "scudo:secondary_integrity");
-        DCHECK_NE(InUseReserved.getBase(), 0U);
-        
-        MemMapT NewAddresses = InUseReserved.dispatch(InUseReserved.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1));
-        CHECK(NewAddresses.isAllocated());
-        NewAddresses.setMemoryPermission(NewAddresses.getBase(), sizeof(void *)*(Config::Secondary::InUseBlocksSize+1), 0);
-        
-        IntegrityList[Config::Secondary::InUseBlocksSize] = reinterpret_cast<void *>(NewAddresses.getBase());
-        
-        IntegrityList = static_cast<void **>(IntegrityList[Config::Secondary::InUseBlocksSize]);
-        IntegrityList[0] = reinterpret_cast<void *>(HeaderPos + LargeBlock::getHeaderSize());
     }
 
     InUseBlocks.push_back(H);
@@ -770,27 +776,29 @@ void MapAllocator<Config>::deallocate(const Options &Options, void *Ptr)
     ScopedLock L(Mutex);
 
 
-    void **IntegrityList = reinterpret_cast<void **>(InUseAddresses.getBase());
-    bool isValid = false;
-    bool reachedEnd = false;
-    
-    while (!reachedEnd) {
-        for (u32 I = 0; I < Config::Secondary::InUseBlocksSize; I++) {
-            if (IntegrityList[I] == Ptr) {
-                isValid = true;
-                IntegrityList[I] = nullptr;
-                break;
+    if (Config::Secondary::VerifyInUseAddresses) {
+        void **IntegrityList = reinterpret_cast<void **>(InUseAddresses.getBase());
+        bool isValid = false;
+        bool reachedEnd = false;
+        
+        while (!reachedEnd) {
+            for (u32 I = 0; I < Config::Secondary::InUseBlocksSize; I++) {
+                if (IntegrityList[I] == Ptr) {
+                    isValid = true;
+                    IntegrityList[I] = nullptr;
+                    break;
+                }
+            }
+            if (!isValid && IntegrityList[Config::Secondary::InUseBlocksSize] != nullptr) {
+                IntegrityList = static_cast<void **>(IntegrityList[Config::Secondary::InUseBlocksSize]);
+            } else {
+                reachedEnd = true;
             }
         }
-        if (!isValid && IntegrityList[Config::Secondary::InUseBlocksSize] != nullptr) {
-            IntegrityList = static_cast<void **>(IntegrityList[Config::Secondary::InUseBlocksSize]);
-        } else {
-            reachedEnd = true;
+        
+        if (!isValid) {
+            return;
         }
-    }
-
-    if (!isValid) {
-        return;
     }
     
     InUseBlocks.remove(H);
